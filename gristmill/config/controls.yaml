@@ -1,0 +1,24 @@
+secondary: !MouseButton
+  button: Right
+move: !KeyAxis2
+  up:
+    key: W
+  down:
+    key: S
+  left:
+    key: A
+  right:
+    key: D
+exit: !Key
+  key: Escape
+look: !MouseMotion
+  sensitivity: 0.01
+fly: !KeyAxis1
+  up:
+    key: Space
+  down:
+    key: LeftShift
+primary: !MouseButton
+  button: Left
+jump: !Key
+  key: Space
