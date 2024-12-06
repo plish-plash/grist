@@ -2,11 +2,14 @@ use gristmill::{
     asset,
     input::{InputEvent, InputSystem},
     two::QuadRenderer,
-    Event, Game, GameLoader, RenderingContext,
+    Event, Game, GameLoader, Obj, RenderingContext,
 };
 use silica::{
     taffy::prelude::*,
-    widget::{Button, Label},
+    view::{
+        button::{Button, SimpleButtonView},
+        label::Label,
+    },
     Gui,
 };
 use std::time::Duration;
@@ -42,7 +45,7 @@ impl ButtonGame {
             changed: Event::new(),
         };
 
-        let label = Label::new(&mut gui);
+        let label = Obj::new(Label::new());
         let label1 = label.clone();
         times_clicked.changed.add_listener(move |value| {
             label1
@@ -50,19 +53,28 @@ impl ButtonGame {
                 .set_text(format!("Times Clicked: {}", *value));
         });
 
-        let button = Button::new(&mut gui, "Click Me!", None);
-        gui.add_widget(root, button, |button, style| {
-            button.add_pressed_listener(move |&()| {
-                times_clicked.value += 1;
-                times_clicked.changed.emit(&times_clicked.value);
-            });
-            style
+        let mut button = Button::with_label("Click Me!", SimpleButtonView::default());
+        button.add_pressed_listener(move |&()| {
+            times_clicked.value += 1;
+            times_clicked.changed.emit(&times_clicked.value);
         });
+        gui.add_view_control(
+            root,
+            Obj::new(button),
+            Style {
+                size: Size::from_lengths(128., 32.),
+                ..Default::default()
+            },
+        );
 
-        gui.add_widget(root, label, |_, style| Style {
-            min_size: Size::from_lengths(256., 32.),
-            ..style
-        });
+        gui.add_view(
+            root,
+            label,
+            Style {
+                size: Size::from_lengths(256., 32.),
+                ..Default::default()
+            },
+        );
 
         ButtonGame {
             input_system,
@@ -75,7 +87,7 @@ impl ButtonGame {
 impl Game for ButtonGame {
     fn set_screen_size(&mut self, width: f32, height: f32) {
         self.renderer.set_screen_size(width, height);
-        self.gui.layout(width, height);
+        self.gui.set_screen_size(width, height);
     }
 
     fn handle_event(&mut self, event: InputEvent) {

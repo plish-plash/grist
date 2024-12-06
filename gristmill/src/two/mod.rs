@@ -126,6 +126,13 @@ impl Rect {
         }
     }
 
+    pub fn contains(&self, position: Vec2) -> bool {
+        position.x >= self.position.x
+            && position.x < self.position.x + self.size.x
+            && position.y >= self.position.y
+            && position.y < self.position.y + self.size.y
+    }
+
     pub fn grow(mut self, amount: f32) -> Rect {
         self.position.x -= amount;
         self.position.y -= amount;

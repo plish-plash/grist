@@ -19,14 +19,12 @@ impl Player {
 }
 
 impl Renderable for Player {
-    fn texture(&self) -> Option<&Texture> {
-        Some(&self.texture)
-    }
-    fn rect(&self) -> Rect {
-        Rect {
+    fn render(&self, renderer: &mut QuadRenderer) {
+        let rect = Rect {
             position: self.position,
             size: Self::SIZE,
-        }
+        };
+        renderer.queue_texture(rect, &self.texture);
     }
 }
 

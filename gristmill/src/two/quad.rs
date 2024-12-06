@@ -88,17 +88,7 @@ mod shader {
 }
 
 pub trait Renderable {
-    fn texture(&self) -> Option<&Texture>;
-    fn color(&self) -> LinSrgba {
-        LinSrgba::new(1., 1., 1., 1.)
-    }
-    fn rect(&self) -> Rect;
-    fn uv_rect(&self) -> Rect {
-        Rect::ONE
-    }
-    fn flip(&self) -> BVec2 {
-        BVec2::new(false, false)
-    }
+    fn render(&self, renderer: &mut QuadRenderer);
 }
 
 pub struct RenderList(Vec<WeakObj<dyn Renderable>>);
@@ -109,6 +99,29 @@ impl RenderList {
     }
     pub fn add(&mut self, renderable: WeakObj<dyn Renderable>) {
         self.0.push(renderable);
+    }
+}
+
+pub struct RenderQuad<'a> {
+    pub texture: Option<&'a Texture>,
+    pub color: LinSrgba,
+    pub rect: Rect,
+    pub uv_rect: Rect,
+    pub flip: BVec2,
+    pub scroll: bool,
+}
+
+impl<'a> Default for RenderQuad<'a> {
+    fn default() -> Self {
+        const WHITE: LinSrgba = LinSrgba::new(1., 1., 1., 1.);
+        Self {
+            texture: None,
+            color: WHITE,
+            rect: Rect::ZERO,
+            uv_rect: Rect::ONE,
+            flip: BVec2::FALSE,
+            scroll: true,
+        }
     }
 }
 
@@ -283,7 +296,7 @@ impl QuadRenderer {
         self.scale = scale;
     }
 
-    fn pixel_correct(&self, mut rect: Rect) -> Rect {
+    fn transform(&self, mut rect: Rect) -> Rect {
         rect.position *= self.scale;
         rect.size *= self.scale;
         if self.pixel_perfect {
@@ -350,9 +363,39 @@ impl QuadRenderer {
         }
     }
 
-    fn queue_raw(&mut self, texture: TextureId, rect: [f32; 4], uv: [f32; 4], color: [f32; 4]) {
+    pub fn queue(&mut self, quad: RenderQuad) {
+        let texture = quad.texture.unwrap_or(&self.white_pixel).id();
+        let mut rect = self.transform(quad.rect);
+        if rect.width() <= 0. || rect.height() <= 0. {
+            return;
+        }
+        if quad.scroll {
+            rect.position -= self.scroll_offset;
+        }
+        if rect.x() + rect.width() < 0.
+            || rect.y() + rect.height() < 0.
+            || rect.x() >= self.screen_size.x
+            || rect.y() >= self.screen_size.y
+        {
+            // rect is outside of the screen
+            return;
+        }
+        let mut uv: [f32; 4] = quad.uv_rect.into();
+        if quad.flip.x {
+            uv[0] += uv[2];
+            uv[2] *= -1.;
+        }
+        if quad.flip.y {
+            uv[1] += uv[3];
+            uv[3] *= -1.;
+        }
+
         self.glyph_layer.finish();
-        self.instances.push(Quad { rect, uv, color });
+        self.instances.push(Quad {
+            rect: rect.into(),
+            uv,
+            color: quad.color.into(),
+        });
         let end = self.instances.len();
         let mut appended = false;
         if let Some(InstanceRange::Instances(instance_texture, range)) =
@@ -369,34 +412,24 @@ impl QuadRenderer {
                 .push(InstanceRange::Instances(texture, start..end));
         }
     }
-    pub fn queue(&mut self, renderable: &dyn Renderable) {
-        let texture = renderable.texture().unwrap_or(&self.white_pixel).id();
-        let mut rect = self.pixel_correct(renderable.rect());
-        rect.position -= self.scroll_offset;
-        if rect.x() + rect.width() < 0.
-            || rect.y() + rect.height() < 0.
-            || rect.x() >= self.screen_size.x
-            || rect.y() >= self.screen_size.y
-        {
-            // rect is outside of the screen
-            return;
-        }
-        let mut uv_rect: [f32; 4] = renderable.uv_rect().into();
-        let flip = renderable.flip();
-        if flip.x {
-            uv_rect[0] += uv_rect[2];
-            uv_rect[2] *= -1.;
-        }
-        if flip.y {
-            uv_rect[1] += uv_rect[3];
-            uv_rect[3] *= -1.;
-        }
-        self.queue_raw(texture, rect.into(), uv_rect, renderable.color().into());
+    pub fn queue_color(&mut self, rect: Rect, color: LinSrgba) {
+        self.queue(RenderQuad {
+            color,
+            rect,
+            ..Default::default()
+        });
+    }
+    pub fn queue_texture(&mut self, rect: Rect, texture: &Texture) {
+        self.queue(RenderQuad {
+            texture: Some(texture),
+            rect,
+            ..Default::default()
+        });
     }
     pub fn queue_all(&mut self, render_list: &mut RenderList) {
         render_list.0.retain(|renderable| {
             if let Some(renderable) = renderable.try_upgrade() {
-                self.queue(&*renderable.get());
+                renderable.get().render(self);
                 true
             } else {
                 false
@@ -450,13 +483,12 @@ impl QuadRenderer {
 
 impl silica::Renderer for QuadRenderer {
     fn queue_rect(&mut self, point: Point<f32>, size: Size<f32>, color: LinSrgba) {
-        let rect = self.pixel_correct(Rect::new(point.x, point.y, size.width, size.height));
-        self.queue_raw(
-            self.white_pixel.id(),
-            rect.into(),
-            Rect::ONE.into(),
-            color.into(),
-        );
+        self.queue(RenderQuad {
+            color,
+            rect: Rect::new(point.x, point.y, size.width, size.height),
+            scroll: false,
+            ..Default::default()
+        });
     }
     fn queue_text(&mut self, mut section: Section) {
         let layer = self.glyph_layer.next();

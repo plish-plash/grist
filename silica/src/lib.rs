@@ -1,11 +1,12 @@
 mod render;
-pub mod widget;
+pub mod view;
 
 use grist::{obj_upcast, Obj};
+use palette::LinSrgba;
 use std::collections::HashMap;
-use taffy::{geometry::Point, prelude::*};
+use taffy::{prelude::*, Point};
 
-use widget::Widget;
+use view::{Control, View};
 
 pub use render::*;
 pub use taffy::{self, NodeId};
@@ -17,31 +18,20 @@ pub enum PointerState {
     Press,
 }
 
-pub struct Node {
-    visual: Option<Visual>,
-}
-
-impl Node {
-    fn can_highlight(&self) -> bool {
-        self.visual
-            .as_ref()
-            .map(|vis| vis.background.is_some())
-            .unwrap_or(false)
-    }
-}
-
 #[derive(Default)]
 pub struct GuiState {
-    highlight: Option<NodeId>,
+    screen_size: Size<f32>,
+    pointer: Point<f32>,
     pointer_down: bool,
+    highlight: Option<NodeId>,
 }
 
 pub struct Gui {
     state: GuiState,
     layout: TaffyTree<()>,
     root: NodeId,
-    nodes: HashMap<NodeId, Node>,
-    widgets: HashMap<NodeId, Obj<dyn Widget>>,
+    views: HashMap<NodeId, Obj<dyn View>>,
+    controls: HashMap<NodeId, Obj<dyn Control>>,
 }
 
 impl Gui {
@@ -52,38 +42,29 @@ impl Gui {
             state: Default::default(),
             layout,
             root,
-            nodes: HashMap::new(),
-            widgets: HashMap::new(),
+            views: HashMap::new(),
+            controls: HashMap::new(),
         }
     }
 
+    pub fn set_screen_size(&mut self, width: f32, height: f32) {
+        self.state.screen_size = Size { width, height };
+        self.layout();
+    }
     pub fn root(&self) -> NodeId {
         self.root
     }
-
-    pub fn create_node(&mut self, style: Style, visual: Option<Visual>) -> NodeId {
-        let node = self.layout.new_leaf(style).unwrap();
-        self.nodes.insert(node, Node { visual });
-        node
+    pub fn add_root(&mut self) -> NodeId {
+        self.layout.new_leaf(Style::DEFAULT).unwrap()
     }
-    pub fn create_widget<W, F>(&mut self, style: Style, visual: Option<Visual>, f: F) -> Obj<W>
-    where
-        W: Widget,
-        F: FnOnce(NodeId) -> W,
-    {
-        let node = self.create_node(style, visual);
-        let widget = Obj::new(f(node));
-        self.widgets.insert(node, obj_upcast!(widget).upgrade());
-        widget
-    }
-    pub fn destroy_node(&mut self, node: NodeId) {
-        self.layout.remove(node).unwrap();
-        self.nodes.remove(&node);
-        self.widgets.remove(&node);
-        if self.state.highlight == Some(node) {
-            self.state.highlight = None;
+    pub fn set_root(&mut self, root: NodeId) {
+        if self.root != root {
+            self.root = root;
+            self.layout();
+            self.handle_pointer_motion(self.state.pointer.x, self.state.pointer.y);
         }
     }
+
     pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
         self.layout.add_child(parent, child).unwrap();
     }
@@ -94,63 +75,69 @@ impl Gui {
         }
     }
 
-    pub fn add_widget<W, F>(&mut self, parent: NodeId, widget: Obj<W>, f: F)
-    where
-        W: Widget,
-        F: FnOnce(&mut W, Style) -> Style,
-    {
-        let mut widget_guard = widget.get_mut();
-        let widget_node = widget_guard.node();
-        let style = self.layout.style(widget_node).unwrap().clone();
-        let style = f(&mut widget_guard, style);
-        self.set_style(widget_node, style);
-        self.add_child(parent, widget_node);
+    pub fn add_node(&mut self, parent: NodeId, style: Style) -> NodeId {
+        let node = self.layout.new_leaf(style).unwrap();
+        self.layout.add_child(parent, node).unwrap();
+        node
+    }
+    pub fn add_view<V: View>(&mut self, parent: NodeId, view: Obj<V>, style: Style) -> NodeId {
+        let node = self.add_node(parent, style);
+        self.views.insert(node, obj_upcast!(view).upgrade());
+        node
+    }
+    pub fn add_view_control<C: View + Control>(
+        &mut self,
+        parent: NodeId,
+        control: Obj<C>,
+        style: Style,
+    ) -> NodeId {
+        let node = self.add_node(parent, style);
+        self.views.insert(node, obj_upcast!(control).upgrade());
+        self.controls.insert(node, obj_upcast!(control).upgrade());
+        node
+    }
+    pub fn destroy(&mut self, node: NodeId) {
+        self.layout.remove(node).unwrap();
+        self.views.remove(&node);
+        self.controls.remove(&node);
+        if self.state.highlight == Some(node) {
+            self.state.highlight = None;
+        }
     }
 
     pub fn set_style(&mut self, node: NodeId, style: Style) {
         self.layout.set_style(node, style).unwrap();
     }
-    pub fn set_visual(&mut self, node: NodeId, visual: Option<Visual>) {
-        let node = self.nodes.get_mut(&node).unwrap();
-        node.visual = visual;
-    }
 
-    pub fn render(&mut self, renderer: &mut dyn Renderer) {
+    pub fn render(&self, renderer: &mut dyn Renderer) {
         let mut renderer = GuiRenderer::new(renderer);
         self.render_node(&mut renderer, self.root);
     }
-    pub fn layout(&mut self, width: f32, height: f32) {
+    pub fn layout(&mut self) {
+        let screen_size = self.state.screen_size;
         let mut root_style = self.layout.style(self.root).unwrap().clone();
-        root_style.size = Size::from_lengths(width, height);
+        root_style.size = screen_size.map(Dimension::Length);
         self.layout.set_style(self.root, root_style).unwrap();
         self.layout
-            .compute_layout(
-                self.root,
-                Size {
-                    width: AvailableSpace::Definite(width),
-                    height: AvailableSpace::Definite(height),
-                },
-            )
+            .compute_layout(self.root, screen_size.map(AvailableSpace::Definite))
             .unwrap();
     }
     pub fn handle_pointer_motion(&mut self, x: f32, y: f32) {
+        self.state.pointer = Point { x, y };
         let highlight = self.hit_highlightable_node(self.root, x, y);
         if highlight != self.state.highlight {
             if let Some(node) = self.state.highlight {
-                if let Some(widget) = self.widgets.get(&node).cloned() {
-                    widget.get_mut().handle_pointer(self, PointerState::None);
+                if let Some(widget) = self.controls.get(&node) {
+                    widget.get_mut().handle_pointer(PointerState::None);
                 }
             }
             if let Some(node) = highlight {
-                if let Some(widget) = self.widgets.get(&node).cloned() {
-                    widget.get_mut().handle_pointer(
-                        self,
-                        if self.state.pointer_down {
-                            PointerState::Press
-                        } else {
-                            PointerState::Over
-                        },
-                    );
+                if let Some(widget) = self.controls.get(&node) {
+                    widget.get_mut().handle_pointer(if self.state.pointer_down {
+                        PointerState::Press
+                    } else {
+                        PointerState::Over
+                    });
                 }
             }
             self.state.highlight = highlight;
@@ -161,15 +148,12 @@ impl Gui {
             return;
         }
         if let Some(node) = self.state.highlight {
-            if let Some(widget) = self.widgets.get(&node).cloned() {
-                widget.get_mut().handle_pointer(
-                    self,
-                    if pressed {
-                        PointerState::Press
-                    } else {
-                        PointerState::Over
-                    },
-                );
+            if let Some(widget) = self.controls.get(&node) {
+                widget.get_mut().handle_pointer(if pressed {
+                    PointerState::Press
+                } else {
+                    PointerState::Over
+                });
             }
         }
         self.state.pointer_down = pressed;
@@ -177,42 +161,20 @@ impl Gui {
 
     fn render_node(&self, renderer: &mut GuiRenderer, node: NodeId) {
         let layout = self.layout.layout(node).unwrap();
-        renderer.save();
+        renderer.push_translation();
         renderer.translate(layout.location.x, layout.location.y);
 
-        if let Some(visual) = self.nodes.get(&node).and_then(|n| n.visual.as_ref()) {
-            if let Some(background) = visual.background {
-                renderer.set_color(background);
-                renderer.draw_rect(Point::ZERO, layout.size);
-            }
-            if let Some(border) = visual.border {
-                let border_size = self.layout.style(node).unwrap().border;
-                let border_size = border_size.map(|val| match val {
-                    LengthPercentage::Length(length) => length,
-                    LengthPercentage::Percent(_) => 0.,
-                });
-                if border_size.left > 0.
-                    || border_size.right > 0.
-                    || border_size.top > 0.
-                    || border_size.bottom > 0.
-                {
-                    renderer.set_color(border);
-                    renderer.draw_border(layout.size, border_size);
-                }
-            }
-            if let Some(foreground) = visual.foreground {
-                if let Some(widget) = self.widgets.get(&node) {
-                    renderer.set_color(foreground);
-                    widget.get().render(renderer, layout.size);
-                }
-            }
+        if let Some(view) = self.views.get(&node) {
+            renderer.set_size(layout.size);
+            renderer.set_color(LinSrgba::new(1., 1., 1., 1.));
+            view.get().render(renderer);
         }
 
         for child in self.layout.child_ids(node) {
             self.render_node(renderer, child);
         }
 
-        renderer.restore();
+        renderer.pop_translation();
     }
 
     fn hit_highlightable_node(&self, node: NodeId, mut x: f32, mut y: f32) -> Option<NodeId> {
@@ -225,12 +187,7 @@ impl Gui {
                     return Some(hit_node);
                 }
             }
-            if self
-                .nodes
-                .get(&node)
-                .map(|n| n.can_highlight())
-                .unwrap_or(false)
-            {
+            if self.controls.contains_key(&node) {
                 return Some(node);
             }
         }
